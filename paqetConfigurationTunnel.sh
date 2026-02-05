@@ -105,17 +105,52 @@ detect_public_ipv4() {
 
 detect_router_mac() {
   local iface="$1"
-  local gw
-  gw=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
+  local gw mac i
 
+  # 1) Find default gateway IPv4
+  gw=$(ip route 2>/dev/null | awk '$1 == "default" {print $3; exit}')
+
+  # 2) Try multiple times to resolve MAC for the gateway itself
   if [[ -n "$gw" ]]; then
-    ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
+    for i in {1..3}; do
+      # trigger ARP resolution
+      ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
+
+      # look for exact gateway IP on this interface
+      mac=$(ip neigh show dev "$iface" 2>/dev/null | awk -v gw="$gw" '$1 == gw {print $5; exit}')
+      if [[ -n "$mac" ]]; then
+        echo "$mac"
+        return
+      fi
+
+      sleep 1
+    done
   fi
 
-  ip neigh show dev "$iface" 2>/dev/null | awk '/REACHABLE/ {print $5; exit}' ||
-  ip neigh show dev "$iface" 2>/dev/null | awk '{print $5; exit}' ||
-  arp -n 2>/dev/null | awk 'NR==2 {print $3}'
+  # 3) Fallback: any REACHABLE neighbor on this interface
+  mac=$(ip neigh show dev "$iface" 2>/dev/null | awk '/REACHABLE/ {print $5; exit}')
+  if [[ -n "$mac" ]]; then
+    echo "$mac"
+    return
+  fi
+
+  # 4) Fallback: first neighbor on this interface
+  mac=$(ip neigh show dev "$iface" 2>/dev/null | awk '{print $5; exit}')
+  if [[ -n "$mac" ]]; then
+    echo "$mac"
+    return
+  fi
+
+  # 5) Final fallback: ARP table without iface filter
+  mac=$(arp -n 2>/dev/null | awk 'NR==2 {print $3}')
+  if [[ -n "$mac" ]]; then
+    echo "$mac"
+    return
+  fi
+
+  # If everything fails, return empty; caller will ask user manually
 }
+
 
 ############################################
 # Input helpers
