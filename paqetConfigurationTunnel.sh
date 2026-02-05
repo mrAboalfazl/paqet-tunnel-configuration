@@ -45,8 +45,7 @@ bootstrap() {
     iptables \
     iptables-persistent \
     curl \
-    tar \
-    ss
+    tar
 
   mkdir -p "$BASE_DIR" "$CONFIG_DIR"
 
