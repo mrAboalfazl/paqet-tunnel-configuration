@@ -23,6 +23,58 @@ debug_router_log() {
 }
 
 
+PAQET_BIN="/root/paqet/paqet_linux_amd64"
+
+check_paqet_binary() {
+  echo "== Checking paqet binary =="
+
+  # 1) Check existence
+  if [[ ! -f "${PAQET_BIN}" ]]; then
+    echo "ERROR: paqet binary not found at: ${PAQET_BIN}"
+    echo "Make sure you have built or copied the correct 'paqet_linux_amd64' binary to this path."
+    exit 1
+  fi
+
+  # 2) Check executability
+  if [[ ! -x "${PAQET_BIN}" ]]; then
+    echo "INFO: paqet binary is not executable. Fixing permissions..."
+    chmod +x "${PAQET_BIN}" || {
+      echo "ERROR: failed to chmod +x ${PAQET_BIN}"
+      exit 1
+    }
+  fi
+
+  # 3) Try a lightweight run and capture output + exit code
+  # We use a harmless flag (help). If paqet supports 'version' you can swap to that.
+  local output
+  if ! output=$("${PAQET_BIN}" --help 2>&1 </dev/null | head -n 10); then
+    # Any non-zero exit: inspect for GLIBC or other fatal issues
+    if echo "${output}" | grep -q "GLIBC_"; then
+      echo "ERROR: paqet binary is not compatible with this system's glibc."
+      echo "Detected error:"
+      echo "----------------------------------------"
+      echo "${output}"
+      echo "----------------------------------------"
+      echo "You must rebuild paqet on this OS (Ubuntu 20.04) or copy a compatible 'paqet_linux_amd64' binary here."
+      exit 1
+    fi
+
+    echo "ERROR: paqet binary failed to run correctly."
+    echo "Output:"
+    echo "----------------------------------------"
+    echo "${output}"
+    echo "----------------------------------------"
+    echo "Fix the binary and try again."
+    exit 1
+  fi
+
+  # 4) If we reach here, binary at least runs on this system
+  echo "paqet binary seems to be compatible and runnable on this system."
+  echo
+}
+
+
+
 ############################################
 # Utility helpers
 ############################################
