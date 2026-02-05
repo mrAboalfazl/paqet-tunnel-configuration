@@ -110,18 +110,19 @@ detect_router_mac() {
   # 1) پیدا کردن default gateway IPv4
   gw=$(ip route 2>/dev/null | awk '$1 == "default" {print $3; exit}')
 
-  # اگر default route نداریم، شانسی نمی‌زنیم
+  # اگر default route نداریم، شانسی بازی نمی‌کنیم
   if [[ -z "$gw" ]]; then
     return
   fi
 
-  # 2) چند بار تلاش برای گرفتن MAC گیت‌وی
+  # 2) چند بار تلاش برای گرفتن MAC خود گیت‌وی
   for i in {1..5}; do
-    # یه بار برای مطمئن شدن یه ترافیک بفرستیم که ARP گرم شه
+    # سعی می‌کنیم ARP رو گرم کنیم
     ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
 
+    # این‌جا اشتباه قبلی را درست می‌کنیم: lladdr توی $4 است
     mac=$(ip neigh show dev "$iface" 2>/dev/null \
-      | awk -v gw="$gw" '$1 == gw && $3 == "lladdr" {print $5; exit}')
+      | awk -v gw="$gw" '$1 == gw && $4 == "lladdr" {print $5; exit}')
 
     if [[ -n "$mac" ]]; then
       echo "$mac"
@@ -131,7 +132,15 @@ detect_router_mac() {
     sleep 1
   done
 
-  # 3) fallback: هر IPv4 که روی این interface REACHABLE است
+  # 3) fallback: اگر گیت‌وی tag "router" داشته باشد (بعضی دیتاسنترها)
+  mac=$(ip neigh show dev "$iface" 2>/dev/null \
+    | awk '($1 ~ /^[0-9]+\./) && /router/ {print $5; exit}')
+  if [[ -n "$mac" ]]; then
+    echo "$mac"
+    return
+  fi
+
+  # 4) fallback: اولین IPv4 که REACHABLE است (فقط وقتی هیچ چیز بهتر نداریم)
   mac=$(ip neigh show dev "$iface" 2>/dev/null \
     | awk '($1 ~ /^[0-9]+\./) && /REACHABLE/ {print $5; exit}')
   if [[ -n "$mac" ]]; then
@@ -139,7 +148,7 @@ detect_router_mac() {
     return
   fi
 
-  # 4) fallback: اولین IPv4 neighbor روی این interface
+  # 5) fallback: اولین IPv4 neighbor روی این اینترفیس
   mac=$(ip neigh show dev "$iface" 2>/dev/null \
     | awk '$1 ~ /^[0-9]+\./ {print $5; exit}')
   if [[ -n "$mac" ]]; then
@@ -147,15 +156,16 @@ detect_router_mac() {
     return
   fi
 
-  # 5) آخرین تیر: ARP table کلی
+  # 6) آخرین fallback: ARP table کلی
   mac=$(arp -n 2>/dev/null | awk 'NR==2 {print $3}')
   if [[ -n "$mac" ]]; then
     echo "$mac"
     return
   fi
 
-  # اگر هیچ‌کدوم جواب نداد → تابع خروجی خالی می‌ده و اسکریپت می‌ره روی حالت manual
+  # اگر هیچ‌کدوم جواب ندادن، خروجی خالی می‌دیم و اسکریپت می‌ره روی حالت manual
 }
+
 
 ############################################
 # Input helpers
