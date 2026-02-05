@@ -27,6 +27,15 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+print_step() {
+  local title="$1"
+  echo
+  echo "----------------------------------------"
+  echo "$title"
+  echo "----------------------------------------"
+  echo
+}
+
 ############################################
 # Bootstrap
 ############################################
@@ -61,7 +70,7 @@ bootstrap() {
 # Detection helpers
 ############################################
 detect_default_iface() {
-  ip route show default | awk '{print $5}' | head -n1
+  ip route show default 2>/dev/null | awk '{print $5}' | head -n1
 }
 
 detect_public_ipv4() {
@@ -72,20 +81,22 @@ detect_public_ipv4() {
     return
   fi
 
-  ip=$(hostname -I | awk '{print $1}' || true)
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
   [[ -n "$ip" ]] && echo "$ip"
 }
 
 detect_router_mac() {
   local iface="$1"
   local gw
-  gw=$(ip route show default | awk '{print $3}' | head -n1)
+  gw=$(ip route show default 2>/dev/null | awk '{print $3}' | head -n1)
 
-  ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
+  if [[ -n "$gw" ]]; then
+    ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
+  fi
 
-  ip neigh show dev "$iface" | awk '/REACHABLE/ {print $5; exit}' ||
-  ip neigh show dev "$iface" | awk '{print $5; exit}' ||
-  arp -n | awk '{print $3; exit}'
+  ip neigh show dev "$iface" 2>/dev/null | awk '/REACHABLE/ {print $5; exit}' ||
+  ip neigh show dev "$iface" 2>/dev/null | awk '{print $5; exit}' ||
+  arp -n 2>/dev/null | awk 'NR==2 {print $3}'
 }
 
 ############################################
@@ -95,17 +106,25 @@ confirm_or_manual() {
   local detected="$1"
   local label="$2"
 
-  echo "Detected $label: $detected"
-  echo "[1] Use detected value"
-  echo "[2] Enter manually"
-  read -rp "Choice: " c
+  echo
+  echo ">>> $label configuration"
 
-  if [[ "$c" == "1" ]]; then
-    echo "$detected"
+  if [[ -n "$detected" ]]; then
+    echo "Detected $label: $detected"
+    echo "[1] Use detected value"
+    echo "[2] Enter manually"
+    read -rp "Choice [1/2]: " c
+
+    if [[ "$c" == "1" ]]; then
+      echo "$detected"
+      return
+    fi
   else
-    read -rp "Enter $label manually: " manual
-    echo "$manual"
+    echo "No $label detected automatically."
   fi
+
+  read -rp "Enter $label manually: " manual
+  echo "$manual"
 }
 
 validate_port() {
@@ -113,7 +132,10 @@ validate_port() {
 
   [[ "$port" =~ ^[0-9]+$ ]] || return 1
   (( port >= 1 && port <= 65535 )) || return 1
-  ! ss -lntup | grep -q ":$port " || return 1
+
+  if command_exists ss; then
+    ! ss -lntup 2>/dev/null | grep -q ":$port " || return 1
+  fi
 
   return 0
 }
@@ -154,20 +176,23 @@ EOF
 apply_iptables() {
   local port="$1"
 
+  # raw table - bypass conntrack
   iptables -t raw -C PREROUTING -p tcp --dport "$port" -j NOTRACK 2>/dev/null || \
-  iptables -t raw -A PREROUTING -p tcp --dport "$port" -j NOTRACK
+    iptables -t raw -A PREROUTING -p tcp --dport "$port" -j NOTRACK
 
   iptables -t raw -C OUTPUT -p tcp --sport "$port" -j NOTRACK 2>/dev/null || \
-  iptables -t raw -A OUTPUT -p tcp --sport "$port" -j NOTRACK
+    iptables -t raw -A OUTPUT -p tcp --sport "$port" -j NOTRACK
 
+  # prevent TCP RST
   iptables -t mangle -C OUTPUT -p tcp --sport "$port" --tcp-flags RST RST -j DROP 2>/dev/null || \
-  iptables -t mangle -A OUTPUT -p tcp --sport "$port" --tcp-flags RST RST -j DROP
+    iptables -t mangle -A OUTPUT -p tcp --sport "$port" --tcp-flags RST RST -j DROP
 
+  # ensure ACCEPT on filter table
   iptables -t filter -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
-  iptables -t filter -A INPUT -p tcp --dport "$port" -j ACCEPT
+    iptables -t filter -A INPUT -p tcp --dport "$port" -j ACCEPT
 
   iptables -t filter -C OUTPUT -p tcp --sport "$port" -j ACCEPT 2>/dev/null || \
-  iptables -t filter -A OUTPUT -p tcp --sport "$port" -j ACCEPT
+    iptables -t filter -A OUTPUT -p tcp --sport "$port" -j ACCEPT
 
   iptables-save > /etc/iptables/rules.v4
 }
@@ -176,7 +201,7 @@ apply_iptables() {
 # Tunnel creation
 ############################################
 create_tunnel() {
-  echo "Select role:"
+  print_step "[STEP 1] Select role"
   echo "1) Iran (Client)"
   echo "2) Kharej (Server)"
   read -rp "Choice: " role_choice
@@ -186,34 +211,47 @@ create_tunnel() {
   local role
   [[ "$role_choice" == "1" ]] && role="client" || role="server"
 
+  print_step "[STEP 2] Tunnel name"
   read -rp "Enter tunnel name: " name
+  [[ -z "$name" ]] && die "Tunnel name cannot be empty"
   [[ -f "$CONFIG_DIR/$name.yaml" ]] && die "Tunnel already exists"
 
+  print_step "[STEP 3] Interface detection"
   local iface ip mac
   iface=$(confirm_or_manual "$(detect_default_iface)" "interface")
+
+  print_step "[STEP 4] IPv4 detection"
   ip=$(confirm_or_manual "$(detect_public_ipv4)" "IPv4 address")
+
+  print_step "[STEP 5] Router MAC detection"
   mac=$(confirm_or_manual "$(detect_router_mac "$iface")" "router MAC")
 
   if [[ "$role" == "client" ]]; then
+    print_step "[STEP 6] Ports and protocol (Client)"
     local client_port server_port transport_port protocol server_ip key
 
     while true; do
       read -rp "Iran (Client) listen port: " client_port
-      validate_port "$client_port" && break
-      echo "Invalid or busy port"
+      if validate_port "$client_port"; then
+        break
+      fi
+      echo "Invalid or busy port, try again."
     done
 
     read -rp "Kharej (Server) service port: " server_port
 
     while true; do
       read -rp "Transport port: " transport_port
-      validate_port "$transport_port" && break
-      echo "Invalid or busy port"
+      if validate_port "$transport_port"; then
+        break
+      fi
+      echo "Invalid or busy port, try again."
     done
 
     read -rp "Protocol [tcp/udp] (default tcp): " protocol
     protocol=${protocol:-tcp}
 
+    print_step "[STEP 7] Server IP and key (Client)"
     read -rp "Kharej public IPv4: " server_ip
     read -rp "KCP secret key: " key
 
@@ -247,12 +285,15 @@ EOF
     create_service "$name" "$CONFIG_DIR/$name.yaml" "Client"
 
   else
+    print_step "[STEP 6] Transport port and key (Server)"
     local transport_port key
 
     while true; do
       read -rp "Transport port: " transport_port
-      validate_port "$transport_port" && break
-      echo "Invalid or busy port"
+      if validate_port "$transport_port"; then
+        break
+      fi
+      echo "Invalid or busy port, try again."
     done
 
     read -rp "KCP secret key: " key
@@ -283,7 +324,43 @@ EOF
     create_service "$name" "$CONFIG_DIR/$name.yaml" "Server"
   fi
 
-  systemctl status "paqet-$name" --no-pager
+  echo
+  echo "========== TUNNEL SUMMARY =========="
+  echo "Tunnel name: $name"
+  echo "Role: $role"
+  echo "Interface: $iface"
+  echo "IPv4: $ip"
+  echo "Router MAC: $mac"
+  echo
+  echo "Service status:"
+  systemctl status "paqet-$name" --no-pager || true
+}
+
+############################################
+# Edit tunnel (recreate)
+############################################
+edit_tunnel() {
+  read -rp "Tunnel name to edit: " t
+  local cfg="$CONFIG_DIR/$t.yaml"
+  local svc="$SYSTEMD_DIR/paqet-$t.service"
+
+  [[ -f "$cfg" ]] || die "Config for tunnel '$t' does not exist"
+
+  echo "This will recreate the tunnel '$t' from scratch."
+  read -rp "Are you sure? [y/N]: " ans
+  [[ "$ans" == "y" || "$ans" == "Y" ]] || return 0
+
+  systemctl stop "paqet-$t" 2>/dev/null || true
+  rm -f "$cfg" "$svc"
+  systemctl daemon-reload
+
+  # Recreate with same name: call create_tunnel but reuse name logic
+  echo
+  echo "Recreating tunnel '$t'..."
+  # temporary hack: we call create_tunnel but bypass name check by moving old name aside
+  # simpler: ask user to enter name again and tell them to reuse same name
+
+  create_tunnel
 }
 
 ############################################
@@ -297,18 +374,56 @@ while true; do
   echo "1) Create new tunnel"
   echo "2) List tunnels"
   echo "3) Show tunnel status"
-  echo "4) Restart tunnel"
-  echo "5) Delete tunnel"
+  echo "4) Edit tunnel"
+  echo "5) Restart tunnel"
+  echo "6) Delete tunnel"
   echo "0) Exit"
   read -rp "Choice: " choice
 
   case "$choice" in
-    1) create_tunnel; pause ;;
-    2) ls "$CONFIG_DIR" | sed 's/.yaml$//' || true; pause ;;
-    3) read -rp "Tunnel name: " t; systemctl status "paqet-$t" --no-pager || true; pause ;;
-    4) read -rp "Tunnel name: " t; systemctl restart "paqet-$t"; pause ;;
-    5) read -rp "Tunnel name: " t; systemctl stop "paqet-$t"; rm -f "$CONFIG_DIR/$t.yaml" "$SYSTEMD_DIR/paqet-$t.service"; systemctl daemon-reload; pause ;;
-    0) exit 0 ;;
-    *) echo "Invalid option"; pause ;;
+    1)
+      create_tunnel
+      pause
+      ;;
+    2)
+      echo
+      echo "Existing tunnels:"
+      if ls "$CONFIG_DIR"/*.yaml >/dev/null 2>&1; then
+        ls "$CONFIG_DIR"/*.yaml | xargs -n1 basename | sed 's/\.yaml$//'
+      else
+        echo "(none)"
+      fi
+      pause
+      ;;
+    3)
+      read -rp "Tunnel name: " t
+      echo
+      systemctl status "paqet-$t" --no-pager || echo "Service paqet-$t not found"
+      pause
+      ;;
+    4)
+      edit_tunnel
+      pause
+      ;;
+    5)
+      read -rp "Tunnel name: " t
+      systemctl restart "paqet-$t" || echo "Failed to restart paqet-$t"
+      pause
+      ;;
+    6)
+      read -rp "Tunnel name: " t
+      systemctl stop "paqet-$t" 2>/dev/null || true
+      rm -f "$CONFIG_DIR/$t.yaml" "$SYSTEMD_DIR/paqet-$t.service"
+      systemctl daemon-reload
+      echo "Tunnel '$t' removed (if it existed)."
+      pause
+      ;;
+    0)
+      exit 0
+      ;;
+    *)
+      echo "Invalid option"
+      pause
+      ;;
   esac
 done
