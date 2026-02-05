@@ -58,7 +58,7 @@ bootstrap() {
 
   mkdir -p "$BASE_DIR" "$CONFIG_DIR"
 
-  # Prefer existing binary over download (for filtered/blocked environments)
+  # Prefer existing binary over download (for filtered environments)
   if [ -f "$BASE_DIR/$BIN_NAME" ]; then
     echo "Found paqet binary in $BASE_DIR, skipping download."
   elif [ -f "/root/$BIN_NAME" ]; then
@@ -75,12 +75,20 @@ bootstrap() {
   fi
 }
 
-
 ############################################
 # Detection helpers
 ############################################
 detect_default_iface() {
-  ip route show default 2>/dev/null | awk '{print $5}' | head -n1
+  ip route 2>/dev/null | awk '
+    $1 == "default" {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "dev" && (i+1) <= NF) {
+          print $(i+1);
+          exit;
+        }
+      }
+    }
+  '
 }
 
 detect_public_ipv4() {
@@ -98,7 +106,7 @@ detect_public_ipv4() {
 detect_router_mac() {
   local iface="$1"
   local gw
-  gw=$(ip route show default 2>/dev/null | awk '{print $3}' | head -n1)
+  gw=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
 
   if [[ -n "$gw" ]]; then
     ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
@@ -112,29 +120,33 @@ detect_router_mac() {
 ############################################
 # Input helpers
 ############################################
+# Usage: confirm_or_manual VAR_NAME DETECTED LABEL
 confirm_or_manual() {
-  local detected="$1"
-  local label="$2"
+  local var_name="$1"
+  local detected="$2"
+  local label="$3"
+  local value
+  local choice
 
   echo
   echo ">>> $label configuration"
 
-  if [[ -n "$detected" ]]; then
+  if [[ -z "$detected" ]]; then
+    echo "No $label detected automatically."
+    read -rp "Enter $label manually: " value
+  else
     echo "Detected $label: $detected"
     echo "[1] Use detected value"
     echo "[2] Enter manually"
-    read -rp "Choice [1/2]: " c
-
-    if [[ "$c" == "1" ]]; then
-      echo "$detected"
-      return
+    read -rp "Choice [1/2]: " choice
+    if [[ "$choice" == "1" ]]; then
+      value="$detected"
+    else
+      read -rp "Enter $label manually: " value
     fi
-  else
-    echo "No $label detected automatically."
   fi
 
-  read -rp "Enter $label manually: " manual
-  echo "$manual"
+  printf -v "$var_name" '%s' "$value"
 }
 
 validate_port() {
@@ -228,13 +240,13 @@ create_tunnel() {
 
   print_step "[STEP 3] Interface detection"
   local iface ip mac
-  iface=$(confirm_or_manual "$(detect_default_iface)" "interface")
+  confirm_or_manual iface "$(detect_default_iface)" "interface"
 
   print_step "[STEP 4] IPv4 detection"
-  ip=$(confirm_or_manual "$(detect_public_ipv4)" "IPv4 address")
+  confirm_or_manual ip "$(detect_public_ipv4)" "IPv4 address"
 
   print_step "[STEP 5] Router MAC detection"
-  mac=$(confirm_or_manual "$(detect_router_mac "$iface")" "router MAC")
+  confirm_or_manual mac "$(detect_router_mac "$iface")" "router MAC"
 
   if [[ "$role" == "client" ]]; then
     print_step "[STEP 6] Ports and protocol (Client)"
@@ -363,12 +375,6 @@ edit_tunnel() {
   systemctl stop "paqet-$t" 2>/dev/null || true
   rm -f "$cfg" "$svc"
   systemctl daemon-reload
-
-  # Recreate with same name: call create_tunnel but reuse name logic
-  echo
-  echo "Recreating tunnel '$t'..."
-  # temporary hack: we call create_tunnel but bypass name check by moving old name aside
-  # simpler: ask user to enter name again and tell them to reuse same name
 
   create_tunnel
 }
