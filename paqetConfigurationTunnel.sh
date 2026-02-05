@@ -11,6 +11,18 @@ BIN_URL="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/pa
 BIN_NAME="paqet_linux_amd64"
 SYSTEMD_DIR="/etc/systemd/system"
 
+
+# Enable extra debug logs for router MAC detection (0 = off, 1 = on)
+DEBUG_ROUTER_MAC=1
+
+debug_router_log() {
+  if [[ "${DEBUG_ROUTER_MAC}" == "1" ]]; then
+    # send to stderr so it doesn't break menus
+    echo "[DEBUG][router-mac] $*" >&2
+  fi
+}
+
+
 ############################################
 # Utility helpers
 ############################################
@@ -107,64 +119,109 @@ detect_router_mac() {
   local iface="$1"
   local gw mac i
 
-  # 1) پیدا کردن default gateway IPv4
+  debug_router_log "detect_router_mac() called with iface=${iface}"
+
+  # 1) Get default IPv4 gateway
   gw=$(ip route 2>/dev/null | awk '$1 == "default" {print $3; exit}')
 
-  # اگر default route نداریم، شانسی بازی نمی‌کنیم
+  debug_router_log "ip route default gateway: '${gw}'"
+  debug_router_log "full 'ip route' output:"
+  ip route 2>/dev/null | sed 's/^/[DEBUG][ip route] /' >&2
+
   if [[ -z "$gw" ]]; then
+    debug_router_log "No default gateway found. Aborting auto-detection."
     return
   fi
 
-  # 2) چند بار تلاش برای گرفتن MAC خود گیت‌وی
+  debug_router_log "Initial 'ip neigh show dev ${iface}':"
+  ip neigh show dev "${iface}" 2>/dev/null | sed 's/^/[DEBUG][ip neigh initial] /' >&2
+
+  # 2) Try multiple times to resolve the MAC for the gateway IP on this interface
   for i in {1..5}; do
-    # سعی می‌کنیم ARP رو گرم کنیم
-    ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
+    debug_router_log "Attempt #${i} to resolve MAC for gateway ${gw} on iface ${iface}"
 
-    # این‌جا اشتباه قبلی را درست می‌کنیم: lladdr توی $4 است
-    mac=$(ip neigh show dev "$iface" 2>/dev/null \
-      | awk -v gw="$gw" '$1 == gw && $4 == "lladdr" {print $5; exit}')
+    # try to warm up ARP
+    ping -c 1 -W 1 "${gw}" >/dev/null 2>&1 || debug_router_log "ping to gateway ${gw} failed or timed out (this may still be ok)"
 
-    if [[ -n "$mac" ]]; then
-      echo "$mac"
+    debug_router_log "'ip neigh show dev ${iface}' after ping attempt #${i}:"
+    ip neigh show dev "${iface}" 2>/dev/null | sed "s/^/[DEBUG][ip neigh attempt ${i}] /" >&2
+
+    # NOTE: ip neigh format example:
+    # 185.235.197.1 dev eth0 lladdr 18:e7:28:07:94:fc REACHABLE
+    # $1 = IP, $2 = dev, $3 = IFACE, $4 = lladdr, $5 = MAC, $6 = STATE
+    mac=$(ip neigh show dev "${iface}" 2>/dev/null \
+      | awk -v gw="${gw}" '$1 == gw && $4 == "lladdr" {print $5; exit}')
+
+    debug_router_log "MAC candidate from gateway match on attempt #${i}: '${mac}'"
+
+    if [[ -n "${mac}" ]]; then
+      debug_router_log "Resolved router MAC from gateway entry: ${mac}"
+      echo "${mac}"
       return
     fi
 
     sleep 1
   done
 
-  # 3) fallback: اگر گیت‌وی tag "router" داشته باشد (بعضی دیتاسنترها)
-  mac=$(ip neigh show dev "$iface" 2>/dev/null \
+  debug_router_log "Failed to resolve MAC directly from gateway entry after retries."
+
+  # 3) Fallback: neighbor entries tagged as 'router'
+  debug_router_log "Trying fallback: any IPv4 neighbor with 'router' tag on iface ${iface}"
+
+  mac=$(ip neigh show dev "${iface}" 2>/dev/null \
     | awk '($1 ~ /^[0-9]+\./) && /router/ {print $5; exit}')
-  if [[ -n "$mac" ]]; then
-    echo "$mac"
+
+  debug_router_log "MAC candidate from 'router' tag fallback: '${mac}'"
+
+  if [[ -n "${mac}" ]]; then
+    debug_router_log "Resolved router MAC from 'router' tagged neighbor: ${mac}"
+    echo "${mac}"
     return
   fi
 
-  # 4) fallback: اولین IPv4 که REACHABLE است (فقط وقتی هیچ چیز بهتر نداریم)
-  mac=$(ip neigh show dev "$iface" 2>/dev/null \
+  # 4) Fallback: any REACHABLE IPv4 neighbor
+  debug_router_log "Trying fallback: any REACHABLE IPv4 neighbor on iface ${iface}"
+
+  mac=$(ip neigh show dev "${iface}" 2>/dev/null \
     | awk '($1 ~ /^[0-9]+\./) && /REACHABLE/ {print $5; exit}')
-  if [[ -n "$mac" ]]; then
-    echo "$mac"
+
+  debug_router_log "MAC candidate from REACHABLE IPv4 fallback: '${mac}'"
+
+  if [[ -n "${mac}" ]]; then
+    debug_router_log "Resolved router MAC from REACHABLE IPv4 neighbor: ${mac}"
+    echo "${mac}"
     return
   fi
 
-  # 5) fallback: اولین IPv4 neighbor روی این اینترفیس
-  mac=$(ip neigh show dev "$iface" 2>/dev/null \
+  # 5) Fallback: first IPv4 neighbor
+  debug_router_log "Trying fallback: first IPv4 neighbor on iface ${iface}"
+
+  mac=$(ip neigh show dev "${iface}" 2>/dev/null \
     | awk '$1 ~ /^[0-9]+\./ {print $5; exit}')
-  if [[ -n "$mac" ]]; then
-    echo "$mac"
+
+  debug_router_log "MAC candidate from first IPv4 neighbor fallback: '${mac}'"
+
+  if [[ -n "${mac}" ]]; then
+    debug_router_log "Resolved router MAC from first IPv4 neighbor: ${mac}"
+    echo "${mac}"
     return
   fi
 
-  # 6) آخرین fallback: ARP table کلی
+  # 6) Last fallback: ARP table
+  debug_router_log "Trying fallback: ARP table (arp -n)"
+
   mac=$(arp -n 2>/dev/null | awk 'NR==2 {print $3}')
-  if [[ -n "$mac" ]]; then
-    echo "$mac"
+  debug_router_log "MAC candidate from arp -n fallback: '${mac}'"
+
+  if [[ -n "${mac}" ]]; then
+    debug_router_log "Resolved router MAC from arp table: ${mac}"
+    echo "${mac}"
     return
   fi
 
-  # اگر هیچ‌کدوم جواب ندادن، خروجی خالی می‌دیم و اسکریپت می‌ره روی حالت manual
+  debug_router_log "All router MAC detection attempts failed. Returning empty result."
 }
+
 
 
 ############################################
