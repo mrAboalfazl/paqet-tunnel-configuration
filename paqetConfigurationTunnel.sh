@@ -123,9 +123,7 @@ detect_router_mac() {
 
   # 1) Get default IPv4 gateway
   gw=$(ip route 2>/dev/null | awk '$1 == "default" {print $3; exit}')
-
   debug_router_log "ip route default gateway: '${gw}'"
-  debug_router_log "full 'ip route' output:"
   ip route 2>/dev/null | sed 's/^/[DEBUG][ip route] /' >&2
 
   if [[ -z "$gw" ]]; then
@@ -136,21 +134,29 @@ detect_router_mac() {
   debug_router_log "Initial 'ip neigh show dev ${iface}':"
   ip neigh show dev "${iface}" 2>/dev/null | sed 's/^/[DEBUG][ip neigh initial] /' >&2
 
-  # 2) Try multiple times to resolve the MAC for the gateway IP on this interface
+  # 2) Try to resolve MAC of the default gateway (up to 5 attempts)
   for i in {1..5}; do
     debug_router_log "Attempt #${i} to resolve MAC for gateway ${gw} on iface ${iface}"
 
-    # try to warm up ARP
-    ping -c 1 -W 1 "${gw}" >/dev/null 2>&1 || debug_router_log "ping to gateway ${gw} failed or timed out (this may still be ok)"
+    # warm ARP
+    ping -c 1 -W 1 "${gw}" >/dev/null 2>&1 || debug_router_log "ping to gateway ${gw} failed or timed out"
 
     debug_router_log "'ip neigh show dev ${iface}' after ping attempt #${i}:"
     ip neigh show dev "${iface}" 2>/dev/null | sed "s/^/[DEBUG][ip neigh attempt ${i}] /" >&2
 
-    # NOTE: ip neigh format example:
-    # 185.235.197.1 dev eth0 lladdr 18:e7:28:07:94:fc REACHABLE
-    # $1 = IP, $2 = dev, $3 = IFACE, $4 = lladdr, $5 = MAC, $6 = STATE
-    mac=$(ip neigh show dev "${iface}" 2>/dev/null \
-      | awk -v gw="${gw}" '$1 == gw && $4 == "lladdr" {print $5; exit}')
+    # Generic parser: find gateway line, then look for 'lladdr' and take next field as MAC
+    mac=$(
+      ip neigh show dev "${iface}" 2>/dev/null \
+        | awk -v gw="${gw}" '
+          $1 == gw {
+            for (i = 2; i <= NF; i++) {
+              if ($i == "lladdr" && i + 1 <= NF) {
+                print $(i + 1);
+                exit;
+              }
+            }
+          }'
+    )
 
     debug_router_log "MAC candidate from gateway match on attempt #${i}: '${mac}'"
 
@@ -165,11 +171,21 @@ detect_router_mac() {
 
   debug_router_log "Failed to resolve MAC directly from gateway entry after retries."
 
-  # 3) Fallback: neighbor entries tagged as 'router'
+  # 3) Fallback: any IPv4 neighbor with 'router' tag
   debug_router_log "Trying fallback: any IPv4 neighbor with 'router' tag on iface ${iface}"
 
-  mac=$(ip neigh show dev "${iface}" 2>/dev/null \
-    | awk '($1 ~ /^[0-9]+\./) && /router/ {print $5; exit}')
+  mac=$(
+    ip neigh show dev "${iface}" 2>/dev/null \
+      | awk '
+        $1 ~ /^[0-9]+\./ && /router/ {
+          for (i = 2; i <= NF; i++) {
+            if ($i == "lladdr" && i + 1 <= NF) {
+              print $(i + 1);
+              exit;
+            }
+          }
+        }'
+  )
 
   debug_router_log "MAC candidate from 'router' tag fallback: '${mac}'"
 
@@ -182,8 +198,18 @@ detect_router_mac() {
   # 4) Fallback: any REACHABLE IPv4 neighbor
   debug_router_log "Trying fallback: any REACHABLE IPv4 neighbor on iface ${iface}"
 
-  mac=$(ip neigh show dev "${iface}" 2>/dev/null \
-    | awk '($1 ~ /^[0-9]+\./) && /REACHABLE/ {print $5; exit}')
+  mac=$(
+    ip neigh show dev "${iface}" 2>/dev/null \
+      | awk '
+        $1 ~ /^[0-9]+\./ && /REACHABLE/ {
+          for (i = 2; i <= NF; i++) {
+            if ($i == "lladdr" && i + 1 <= NF) {
+              print $(i + 1);
+              exit;
+            }
+          }
+        }'
+  )
 
   debug_router_log "MAC candidate from REACHABLE IPv4 fallback: '${mac}'"
 
@@ -196,8 +222,18 @@ detect_router_mac() {
   # 5) Fallback: first IPv4 neighbor
   debug_router_log "Trying fallback: first IPv4 neighbor on iface ${iface}"
 
-  mac=$(ip neigh show dev "${iface}" 2>/dev/null \
-    | awk '$1 ~ /^[0-9]+\./ {print $5; exit}')
+  mac=$(
+    ip neigh show dev "${iface}" 2>/dev/null \
+      | awk '
+        $1 ~ /^[0-9]+\./ {
+          for (i = 2; i <= NF; i++) {
+            if ($i == "lladdr" && i + 1 <= NF) {
+              print $(i + 1);
+              exit;
+            }
+          }
+        }'
+  )
 
   debug_router_log "MAC candidate from first IPv4 neighbor fallback: '${mac}'"
 
