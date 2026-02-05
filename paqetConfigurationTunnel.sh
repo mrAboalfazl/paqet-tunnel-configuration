@@ -58,13 +58,23 @@ bootstrap() {
 
   mkdir -p "$BASE_DIR" "$CONFIG_DIR"
 
-  if [ ! -f "$BASE_DIR/$BIN_NAME" ]; then
-    echo "Downloading paqet binary..."
-    curl -L "$BIN_URL" -o /tmp/paqet.tar.gz
+  # Prefer existing binary over download (for filtered/blocked environments)
+  if [ -f "$BASE_DIR/$BIN_NAME" ]; then
+    echo "Found paqet binary in $BASE_DIR, skipping download."
+  elif [ -f "/root/$BIN_NAME" ]; then
+    echo "Found paqet binary in /root, moving to $BASE_DIR..."
+    mv "/root/$BIN_NAME" "$BASE_DIR/$BIN_NAME"
+    chmod +x "$BASE_DIR/$BIN_NAME"
+  else
+    echo "Downloading paqet binary from GitHub..."
+    if ! curl -L "$BIN_URL" -o /tmp/paqet.tar.gz; then
+      die "Failed to download paqet binary. Place $BIN_NAME in /root and rerun this script."
+    fi
     tar -xzf /tmp/paqet.tar.gz -C "$BASE_DIR"
     chmod +x "$BASE_DIR/$BIN_NAME"
   fi
 }
+
 
 ############################################
 # Detection helpers
