@@ -107,50 +107,55 @@ detect_router_mac() {
   local iface="$1"
   local gw mac i
 
-  # 1) Find default gateway IPv4
+  # 1) پیدا کردن default gateway IPv4
   gw=$(ip route 2>/dev/null | awk '$1 == "default" {print $3; exit}')
 
-  # 2) Try multiple times to resolve MAC for the gateway itself
-  if [[ -n "$gw" ]]; then
-    for i in {1..3}; do
-      # trigger ARP resolution
-      ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
-
-      # look for exact gateway IP on this interface
-      mac=$(ip neigh show dev "$iface" 2>/dev/null | awk -v gw="$gw" '$1 == gw {print $5; exit}')
-      if [[ -n "$mac" ]]; then
-        echo "$mac"
-        return
-      fi
-
-      sleep 1
-    done
+  # اگر default route نداریم، شانسی نمی‌زنیم
+  if [[ -z "$gw" ]]; then
+    return
   fi
 
-  # 3) Fallback: any REACHABLE neighbor on this interface
-  mac=$(ip neigh show dev "$iface" 2>/dev/null | awk '/REACHABLE/ {print $5; exit}')
+  # 2) چند بار تلاش برای گرفتن MAC گیت‌وی
+  for i in {1..5}; do
+    # یه بار برای مطمئن شدن یه ترافیک بفرستیم که ARP گرم شه
+    ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true
+
+    mac=$(ip neigh show dev "$iface" 2>/dev/null \
+      | awk -v gw="$gw" '$1 == gw && $3 == "lladdr" {print $5; exit}')
+
+    if [[ -n "$mac" ]]; then
+      echo "$mac"
+      return
+    fi
+
+    sleep 1
+  done
+
+  # 3) fallback: هر IPv4 که روی این interface REACHABLE است
+  mac=$(ip neigh show dev "$iface" 2>/dev/null \
+    | awk '($1 ~ /^[0-9]+\./) && /REACHABLE/ {print $5; exit}')
   if [[ -n "$mac" ]]; then
     echo "$mac"
     return
   fi
 
-  # 4) Fallback: first neighbor on this interface
-  mac=$(ip neigh show dev "$iface" 2>/dev/null | awk '{print $5; exit}')
+  # 4) fallback: اولین IPv4 neighbor روی این interface
+  mac=$(ip neigh show dev "$iface" 2>/dev/null \
+    | awk '$1 ~ /^[0-9]+\./ {print $5; exit}')
   if [[ -n "$mac" ]]; then
     echo "$mac"
     return
   fi
 
-  # 5) Final fallback: ARP table without iface filter
+  # 5) آخرین تیر: ARP table کلی
   mac=$(arp -n 2>/dev/null | awk 'NR==2 {print $3}')
   if [[ -n "$mac" ]]; then
     echo "$mac"
     return
   fi
 
-  # If everything fails, return empty; caller will ask user manually
+  # اگر هیچ‌کدوم جواب نداد → تابع خروجی خالی می‌ده و اسکریپت می‌ره روی حالت manual
 }
-
 
 ############################################
 # Input helpers
