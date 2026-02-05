@@ -577,6 +577,7 @@ edit_tunnel() {
 ############################################
 # Main menu
 ############################################
+check_paqet_binary
 bootstrap
 
 while true; do
