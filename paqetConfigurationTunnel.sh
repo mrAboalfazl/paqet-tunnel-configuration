@@ -577,8 +577,9 @@ edit_tunnel() {
 ############################################
 # Main menu
 ############################################
-check_paqet_binary
-bootstrap
+
+bootstrap #check exist binary or download it from github
+check_paqet_binary #check version binary is excutable on this OS
 
 while true; do
   clear
