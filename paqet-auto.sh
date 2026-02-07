@@ -423,48 +423,56 @@ parse_udp2raw_service() {
   local svc="$1"
   reset_parsed_vars
 
-  if ! systemctl list-unit-files "$svc" >/dev/null 2>&1 && \
-     ! systemctl status "$svc" >/dev/null 2>&1; then
-    log_warn "Service $svc not found."
+  # چک وجود سرویس
+  if ! systemctl cat "$svc" >/dev/null 2>&1; then
+    log_warn "Service $svc not found (systemctl cat failed)."
     return 1
   fi
 
+  # گرفتن دقیق خط ExecStart از سکشن [Service]
   local exec_line
-  exec_line=$(systemctl show -p ExecStart --value "$svc" 2>/dev/null || true)
+  exec_line=$(
+    systemctl cat "$svc" 2>/dev/null | awk '
+      /^\[Service\]/ {in_s=1; next}
+      /^\[/ && $0 !~ /^\[Service\]/ {in_s=0}
+      in_s && $1 ~ /^ExecStart=/ {
+        sub(/^ExecStart=/,"",$0);
+        print;
+        exit
+      }
+    '
+  )
+
   if [[ -z "$exec_line" ]]; then
-    log_warn "Service $svc has empty ExecStart."
+    log_warn "Service $svc has no ExecStart= line in [Service] section."
     return 1
   fi
 
-  # systemd ExecStart may contain multiple commands separated by ';'
-  # take the first command
-  exec_line="${exec_line%%;*}"
-
+  # حالا exec_line چیزی شبیه اینه:
+  # /usr/local/bin/udp2raw_amd64 -s -l 0.0.0.0:2186 -r 127.0.0.1:5186 -k "123456" --raw-mode icmp ...
   local want_l=0 want_r=0 want_k=0 want_rm=0
   local token val
+  local LADDR="" RADDR=""
 
   for token in $exec_line; do
+    # هندل کردن token بعد از -l / -r / -k / --raw-mode
     if [[ "$want_l" -eq 1 ]]; then
-      val="$token"
-      want_l=0
+      val="$token"; want_l=0
       [[ -n "$val" ]] && LADDR="$val"
       continue
     fi
     if [[ "$want_r" -eq 1 ]]; then
-      val="$token"
-      want_r=0
+      val="$token"; want_r=0
       [[ -n "$val" ]] && RADDR="$val"
       continue
     fi
     if [[ "$want_k" -eq 1 ]]; then
-      val="$token"
-      want_k=0
+      val="$token"; want_k=0
       [[ -n "$val" ]] && PARSED_KEY="$val"
       continue
     fi
     if [[ "$want_rm" -eq 1 ]]; then
-      val="$token"
-      want_rm=0
+      val="$token"; want_rm=0
       [[ -n "$val" ]] && PARSED_RAW_MODE="$val"
       continue
     fi
@@ -507,25 +515,18 @@ parse_udp2raw_service() {
     esac
   done
 
-  # Normalize raw-mode
+  # نرمال‌سازی raw-mode
   if [[ -n "$PARSED_RAW_MODE" ]]; then
     PARSED_RAW_MODE="$(echo "$PARSED_RAW_MODE" | tr 'A-Z' 'a-z')"
   fi
 
-  # Extract ports/IP from LADDR/RADDR
-  local LADDR="${LADDR:-}"
-  local RADDR="${RADDR:-}"
-
+  # استخراج ip:port از LADDR/RADDR
   if [[ -n "$LADDR" ]]; then
-    # Expect ip:port
     local lp="${LADDR##*:}"
-    if [[ "$lp" =~ ^[0-9]+$ ]]; then
-      PARSED_LPORT="$lp"
-    fi
+    [[ "$lp" =~ ^[0-9]+$ ]] && PARSED_LPORT="$lp"
   fi
 
   if [[ -n "$RADDR" ]]; then
-    # Could be "IP:PORT" or "\"IP\":PORT"
     local cleaned="$RADDR"
     cleaned="${cleaned%\"}"
     cleaned="${cleaned#\"}"
@@ -537,9 +538,8 @@ parse_udp2raw_service() {
     fi
   fi
 
-  # Basic validation
+  # ولیدیشن حداقلی
   local malformed_reason=""
-
   if [[ -z "$PARSED_ROLE" ]]; then
     malformed_reason="missing role (-c/-s)"
   elif [[ -z "$PARSED_LPORT" ]]; then
@@ -557,6 +557,7 @@ parse_udp2raw_service() {
 
   return 0
 }
+
 
 ############################################
 # Cron auto-comment helper
