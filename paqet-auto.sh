@@ -538,6 +538,20 @@ parse_udp2raw_service() {
     fi
   fi
 
+  # Normalize raw-mode
+  if [[ -n "$PARSED_RAW_MODE" ]]; then
+    PARSED_RAW_MODE="$(echo "$PARSED_RAW_MODE" | tr 'A-Z' 'a-z')"
+  fi
+
+  # Strip surrounding quotes from key if present
+  if [[ -n "$PARSED_KEY" ]]; then
+    local k="$PARSED_KEY"
+    k="${k%\"}"   # remove trailing double-quote if any
+    k="${k#\"}"   # remove leading double-quote if any
+    PARSED_KEY="$k"
+  fi
+
+
   # ولیدیشن حداقلی
   local malformed_reason=""
   if [[ -z "$PARSED_ROLE" ]]; then
