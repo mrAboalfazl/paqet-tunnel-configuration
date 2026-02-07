@@ -1,0 +1,19 @@
+role: "server"
+
+log:
+  level: "info"
+
+listen:
+  addr: ":2186"
+
+network:
+  interface: "enp1s0"
+  ipv4:
+    addr: "78.141.225.125:2186"
+    router_mac: "fe:00:04:78:c7:7f"
+
+transport:
+  protocol: "kcp"
+  kcp:
+    block: "aes"
+    key: "123456"
