@@ -111,7 +111,7 @@ bootstrap() {
   fi
 
   apt update -y
-  apt upgrade -y
+  #apt upgrade -y
 
   apt install -y \
     iproute2 \
