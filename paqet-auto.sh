@@ -153,6 +153,7 @@ bootstrap_system() {
     die "This script must be run as root."
   fi
 
+  # فقط برای اطلاع، نه برای قطع کردن کار
   if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
     log_warn "Non-Ubuntu system detected; proceeding but dependencies may fail."
   fi
@@ -164,6 +165,7 @@ bootstrap_system() {
 
   mkdir -p "$BASE_DIR" "$CONFIG_DIR"
 
+  # اگر باینری از قبل وجود دارد، دست نمی‌زنیم
   if [[ -x "$BIN_PATH" ]]; then
     log_info "Found paqet binary at $BIN_PATH"
     return
@@ -183,11 +185,45 @@ bootstrap_system() {
     return
   fi
 
-  local BIN_URL="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/paqet-linux-amd64-v1.0.0-alpha.14.tar.gz"
-  log_info "Downloading Paqet binary from GitHub..."
+  # 🔹 انتخاب هوشمند BIN_URL بر اساس نسخه اوبونتو
+  local BIN_URL_DEFAULT_HANSELIME="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/paqet-linux-amd64-v1.0.0-alpha.14.tar.gz"
+  local BIN_URL_UBUNTU20_COMPAT="https://github.com/mrAboalfazl/paqet-tunnel-configuration/releases/download/v1.0.0/paqet-linux-amd64-v1.0.0.tar.gz"
+
+  local BIN_URL="$BIN_URL_DEFAULT_HANSELIME"
+  local OS_ID="" OS_VER="" OS_MAJOR=""
+
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_ID="${ID:-}"
+    OS_VER="${VERSION_ID:-}"
+  fi
+
+  if [[ "$OS_ID" == "ubuntu" && -n "$OS_VER" ]]; then
+    OS_MAJOR="${OS_VER%%.*}"    # 20 از 20.04 ، 22 از 22.04
+    if [[ "$OS_MAJOR" =~ ^[0-9]+$ ]]; then
+      if (( OS_MAJOR < 22 )); then
+        # Ubuntu 20.x یا پایین‌تر → از باینری خودت استفاده کن
+        BIN_URL="$BIN_URL_UBUNTU20_COMPAT"
+        log_info "Detected Ubuntu $OS_VER (major=$OS_MAJOR) → using Ubuntu20-compatible Paqet binary."
+      else
+        # Ubuntu 22+ → همون hanselime
+        BIN_URL="$BIN_URL_DEFAULT_HANSELIME"
+        log_info "Detected Ubuntu $OS_VER (major=$OS_MAJOR) → using default Paqet binary (hanselime)."
+      fi
+    else
+      log_warn "Could not parse Ubuntu VERSION_ID='$OS_VER'; using default Paqet binary (hanselime)."
+    fi
+  else
+    # OS قابل تشخیص نیست یا Ubuntu نیست → fallback به hanselime
+    log_warn "Ubuntu VERSION_ID not detected or non-Ubuntu system; using default Paqet binary (hanselime)."
+  fi
+
+  log_info "Downloading Paqet binary from: $BIN_URL"
   if ! curl -L "$BIN_URL" -o /tmp/paqet.tar.gz; then
     die "Failed to download Paqet binary from $BIN_URL. Place $BIN_NAME in /root and rerun."
   fi
+
   tar -xzf /tmp/paqet.tar.gz -C "$BASE_DIR"
   rm -f /tmp/paqet.tar.gz
 
@@ -198,6 +234,7 @@ bootstrap_system() {
   chmod +x "$BIN_PATH"
   log_info "Paqet binary installed to $BIN_PATH"
 }
+
 
 check_paqet_binary() {
   log_info "Verifying Paqet binary at $BIN_PATH"
