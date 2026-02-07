@@ -23,14 +23,39 @@ DECOMM_BACKHAUL="no"
 MODE=""
 ONLY_SERVICE=""
 
+# Summary storage: "LEVEL|message"
+SUMMARY_LINES=()
+
 ############################################
-# Logging helpers
+# Colors
 ############################################
+
+if [[ -t 1 ]]; then
+  CLR_RESET="$(printf '\033[0m')"
+  CLR_RED="$(printf '\033[31m')"
+  CLR_GREEN="$(printf '\033[32m')"
+  CLR_YELLOW="$(printf '\033[33m')"
+  CLR_CYAN="$(printf '\033[36m')"
+  CLR_BOLD="$(printf '\033[1m')"
+else
+  CLR_RESET=""
+  CLR_RED=""
+  CLR_GREEN=""
+  CLR_YELLOW=""
+  CLR_CYAN=""
+  CLR_BOLD=""
+fi
 
 log_info()  { echo "[INFO]  $*"; }
 log_warn()  { echo "[WARN]  $*" >&2; }
 log_error() { echo "[ERROR] $*" >&2; }
 die()       { log_error "$*"; exit 1; }
+
+summary_add() {
+  # $1 = LEVEL (OK/WARN/ERR/SKIP/INFO)
+  # $2 = message
+  SUMMARY_LINES+=("$1|$2")
+}
 
 debug_router_log() {
   if [[ "$DEBUG_ROUTER_MAC" == "1" ]]; then
@@ -144,7 +169,6 @@ bootstrap_system() {
     return
   fi
 
-  # Try to reuse existing binary in /root or current directory
   if [[ -x "/root/$BIN_NAME" ]]; then
     log_info "Found $BIN_NAME in /root, moving to $BASE_DIR"
     mv "/root/$BIN_NAME" "$BIN_PATH"
@@ -159,7 +183,6 @@ bootstrap_system() {
     return
   fi
 
-  # Fallback: download from GitHub
   local BIN_URL="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/paqet-linux-amd64-v1.0.0-alpha.14.tar.gz"
   log_info "Downloading Paqet binary from GitHub..."
   if ! curl -L "$BIN_URL" -o /tmp/paqet.tar.gz; then
@@ -347,7 +370,6 @@ detect_router_mac() {
 
 is_port_in_use() {
   local port="$1"
-  # Check both TCP and UDP listeners
   if command -v ss >/dev/null 2>&1; then
     if ss -ltnup 2>/dev/null | grep -qE "[:.]${port}[[:space:]]"; then
       return 0
@@ -373,7 +395,6 @@ is_port_in_use() {
 apply_iptables_server_port() {
   local port="$1"
 
-  # raw table - bypass conntrack
   iptables -t raw -C PREROUTING -p tcp --dport "$port" -j NOTRACK 2>/dev/null || \
     iptables -t raw -A PREROUTING -p tcp --dport "$port" -j NOTRACK || true
 
@@ -393,7 +414,7 @@ apply_iptables_server_port() {
 }
 
 ############################################
-# Parse udp2raw ExecStart
+# Parse udp2raw ExecStart (using systemctl cat)
 ############################################
 # Outputs via global vars:
 #   PARSED_ROLE      (client|server)
@@ -423,13 +444,11 @@ parse_udp2raw_service() {
   local svc="$1"
   reset_parsed_vars
 
-  # چک وجود سرویس
   if ! systemctl cat "$svc" >/dev/null 2>&1; then
     log_warn "Service $svc not found (systemctl cat failed)."
     return 1
   fi
 
-  # گرفتن دقیق خط ExecStart از سکشن [Service]
   local exec_line
   exec_line=$(
     systemctl cat "$svc" 2>/dev/null | awk '
@@ -448,14 +467,11 @@ parse_udp2raw_service() {
     return 1
   fi
 
-  # حالا exec_line چیزی شبیه اینه:
-  # /usr/local/bin/udp2raw_amd64 -s -l 0.0.0.0:2186 -r 127.0.0.1:5186 -k "123456" --raw-mode icmp ...
   local want_l=0 want_r=0 want_k=0 want_rm=0
   local token val
   local LADDR="" RADDR=""
 
   for token in $exec_line; do
-    # هندل کردن token بعد از -l / -r / -k / --raw-mode
     if [[ "$want_l" -eq 1 ]]; then
       val="$token"; want_l=0
       [[ -n "$val" ]] && LADDR="$val"
@@ -515,12 +531,20 @@ parse_udp2raw_service() {
     esac
   done
 
-  # نرمال‌سازی raw-mode
+  # Normalize raw-mode
   if [[ -n "$PARSED_RAW_MODE" ]]; then
     PARSED_RAW_MODE="$(echo "$PARSED_RAW_MODE" | tr 'A-Z' 'a-z')"
   fi
 
-  # استخراج ip:port از LADDR/RADDR
+  # Strip quotes around key if present
+  if [[ -n "$PARSED_KEY" ]]; then
+    local k="$PARSED_KEY"
+    k="${k%\"}"
+    k="${k#\"}"
+    PARSED_KEY="$k"
+  fi
+
+  # Extract ports/IP
   if [[ -n "$LADDR" ]]; then
     local lp="${LADDR##*:}"
     [[ "$lp" =~ ^[0-9]+$ ]] && PARSED_LPORT="$lp"
@@ -538,21 +562,6 @@ parse_udp2raw_service() {
     fi
   fi
 
-  # Normalize raw-mode
-  if [[ -n "$PARSED_RAW_MODE" ]]; then
-    PARSED_RAW_MODE="$(echo "$PARSED_RAW_MODE" | tr 'A-Z' 'a-z')"
-  fi
-
-  # Strip surrounding quotes from key if present
-  if [[ -n "$PARSED_KEY" ]]; then
-    local k="$PARSED_KEY"
-    k="${k%\"}"   # remove trailing double-quote if any
-    k="${k#\"}"   # remove leading double-quote if any
-    PARSED_KEY="$k"
-  fi
-
-
-  # ولیدیشن حداقلی
   local malformed_reason=""
   if [[ -z "$PARSED_ROLE" ]]; then
     malformed_reason="missing role (-c/-s)"
@@ -571,7 +580,6 @@ parse_udp2raw_service() {
 
   return 0
 }
-
 
 ############################################
 # Cron auto-comment helper
@@ -595,11 +603,9 @@ comment_cron_lines_matching() {
   fi
 
   awk -v pat="$pattern" '
-    BEGIN{}
     {
       line=$0
-      # Already commented or PAQET_AUTO tagged
-      if (line ~ /^[[:space:]]*#/ ) {
+      if (line ~ /^[[:space:]]*#/) {
         print line
       }
       else if (index(line, pat) > 0) {
@@ -626,7 +632,6 @@ process_iran() {
   if [[ -n "$ONLY_SERVICE" ]]; then
     services+=("$ONLY_SERVICE")
   else
-    # Collect udp2raw*.service under /etc/systemd/system
     while IFS= read -r path; do
       local name
       name="$(basename "$path")"
@@ -658,11 +663,13 @@ process_iran() {
 
     if ! parse_udp2raw_service "$svc"; then
       log_warn "Skipping $svc due to malformed config."
+      summary_add "WARN" "$svc → malformed udp2raw config; no Paqet created."
       continue
     fi
 
     if [[ "$PARSED_ROLE" != "client" ]]; then
       log_warn "Service $svc role is '$PARSED_ROLE' (expected client); skipping in IRAN mode."
+      summary_add "SKIP" "$svc → role='$PARSED_ROLE' (not client); skipped."
       continue
     fi
 
@@ -677,9 +684,11 @@ process_iran() {
 
     if [[ -f "$cfg_path" ]]; then
       log_info "Config $cfg_path already exists; skipping creation for $svc."
+      summary_add "SKIP" "$svc → Paqet client already exists at ${cfg_path}."
     else
       if [[ -z "$iface" || -z "$ip" || -z "$mac" ]]; then
         log_warn "Missing iface/IP/MAC; cannot create Paqet config for $svc."
+        summary_add "ERR" "$svc → missing iface/IP/MAC; Paqet NOT created."
       else
         log_info "Creating Paqet client config for $svc at $cfg_path"
 
@@ -731,10 +740,15 @@ EOF
         systemctl daemon-reload
         systemctl enable "$svc_name" >/dev/null 2>&1 || true
         systemctl restart "$svc_name" || log_warn "Failed to restart $svc_name"
+
+        if systemctl is-active --quiet "$svc_name"; then
+          summary_add "OK" "$svc → Paqet client ${svc_name} (port ${lport}) created and running."
+        else
+          summary_add "ERR" "$svc → Paqet client ${svc_name} created but NOT running (check systemctl status)."
+        fi
       fi
     fi
 
-    # Always stop/disable the corresponding udp2raw service after conversion attempt
     log_info "Disabling original udp2raw service $svc on IR side."
     systemctl stop "$svc"  >/dev/null 2>&1 || true
     systemctl disable "$svc" >/dev/null 2>&1 || true
@@ -753,7 +767,6 @@ process_kharej() {
   if [[ -n "$ONLY_SERVICE" ]]; then
     services+=("$ONLY_SERVICE")
   else
-    # Default: udp2raw.service
     services+=("udp2raw.service")
   fi
 
@@ -777,15 +790,17 @@ process_kharej() {
 
     if ! parse_udp2raw_service "$svc"; then
       log_warn "Skipping $svc due to malformed config."
+      summary_add "WARN" "$svc → malformed udp2raw config; no Paqet created."
       continue
     fi
 
     if [[ "$PARSED_ROLE" != "server" ]]; then
       log_warn "Service $svc role is '$PARSED_ROLE' (expected server); skipping in KHAREJ mode."
+      summary_add "SKIP" "$svc → role='$PARSED_ROLE' (not server); skipped."
       continue
     fi
 
-    local lport="$PARSED_LPORT"       # transport port (server listen)
+    local lport="$PARSED_LPORT"
     local key="$PARSED_KEY"
     local raw_mode="$PARSED_RAW_MODE"
 
@@ -795,11 +810,13 @@ process_kharej() {
 
     if [[ -f "$cfg_path" ]]; then
       log_info "Config $cfg_path already exists; skipping creation for $svc."
+      summary_add "SKIP" "$svc → Paqet server already exists at ${cfg_path}."
       continue
     fi
 
     if [[ -z "$iface" || -z "$ip" || -z "$mac" ]]; then
       log_warn "Missing iface/IP/MAC; cannot create Paqet config for $svc."
+      summary_add "ERR" "$svc → missing iface/IP/MAC; Paqet NOT created."
       continue
     fi
 
@@ -812,21 +829,19 @@ process_kharej() {
     fi
 
     if [[ "$is_icmp" -eq 0 ]]; then
-      # Non-ICMP: stop/disable udp2raw before binding the same port with Paqet
       log_info "Non-ICMP raw-mode: stopping and disabling $svc before creating Paqet server."
       systemctl stop "$svc"   >/dev/null 2>&1 || true
       systemctl disable "$svc" >/dev/null 2>&1 || true
 
-      # extra safety: ensure port now free
       if is_port_in_use "$lport"; then
         log_warn "Transport port ${lport} still in use after stopping $svc; cannot create Paqet server for $tun_name."
+        summary_add "ERR" "$svc → port ${lport} still in use; Paqet server NOT created."
         continue
       fi
     else
-      # ICMP mode: udp2raw uses ICMP; Paqet can safely bind TCP/UDP on same port,
-      # but we still avoid obvious collisions with other daemons
       if is_port_in_use "$lport"; then
         log_warn "Transport port ${lport} already in use by another process; cannot create Paqet server for $tun_name."
+        summary_add "ERR" "$svc → port ${lport} already in use; Paqet server NOT created."
         continue
       fi
     fi
@@ -877,8 +892,13 @@ EOF
     systemctl enable "$svc_name" >/dev/null 2>&1 || true
     systemctl restart "$svc_name" || log_warn "Failed to restart $svc_name"
 
-    # Optional iptables tuning
     apply_iptables_server_port "$lport"
+
+    if systemctl is-active --quiet "$svc_name"; then
+      summary_add "OK" "$svc → Paqet server ${svc_name} (port ${lport}) created and running."
+    else
+      summary_add "ERR" "$svc → Paqet server ${svc_name} created but NOT running (check systemctl status)."
+    fi
   done
 }
 
@@ -900,6 +920,7 @@ decommission_udp2raw() {
       log_info "Stopping and disabling $s"
       systemctl stop "$s"   >/dev/null 2>&1 || true
       systemctl disable "$s" >/dev/null 2>&1 || true
+      summary_add "INFO" "$s → stopped & disabled (decommission-udp2raw=yes)."
     fi
   done
 
@@ -921,10 +942,42 @@ decommission_backhaul() {
     log_info "Stopping and disabling $name"
     systemctl stop "$name"   >/dev/null 2>&1 || true
     systemctl disable "$name" >/dev/null 2>&1 || true
+    summary_add "INFO" "$name → stopped & disabled (decommission-backhaul=yes)."
   done < <(ls /etc/systemd/system/backhaul*.service 2>/dev/null || true)
 
   log_info "Auto-commenting cron lines containing 'backhaul'"
   comment_cron_lines_matching "backhaul"
+}
+
+############################################
+# Summary printer
+############################################
+
+print_summary() {
+  echo
+  echo "${CLR_BOLD}========== PAQET AUTO SUMMARY ==========${CLR_RESET}"
+
+  if [[ "${#SUMMARY_LINES[@]}" -eq 0 ]]; then
+    echo "${CLR_YELLOW}[INFO]${CLR_RESET} No udp2raw services were processed."
+    return
+  fi
+
+  local entry level msg color
+  for entry in "${SUMMARY_LINES[@]}"; do
+    level="${entry%%|*}"
+    msg="${entry#*|}"
+    color="$CLR_RESET"
+
+    case "$level" in
+      OK)   color="$CLR_GREEN" ;;
+      WARN) color="$CLR_YELLOW" ;;
+      ERR)  color="$CLR_RED" ;;
+      SKIP) color="$CLR_CYAN" ;;
+      INFO) color="$CLR_CYAN" ;;
+    esac
+
+    echo -e "${color}[${level}]${CLR_RESET} $msg"
+  done
 }
 
 ############################################
@@ -952,6 +1005,7 @@ main() {
   decommission_backhaul
 
   log_info "Done."
+  print_summary
 }
 
 main "$@"
