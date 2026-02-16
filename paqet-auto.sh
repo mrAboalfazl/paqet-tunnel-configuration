@@ -160,7 +160,7 @@ bootstrap_system() {
 
   log_info "Ensuring required packages are installed..."
   apt-get update -y >/dev/null 2>&1 || log_warn "apt-get update failed (continuing)"
-  apt-get install -y iproute2 iptables iptables-persistent curl tar >/dev/null 2>&1 || \
+  apt-get install -y iproute2 iptables iptables-persistent curl tar file >/dev/null 2>&1 || \
     log_warn "apt-get install failed for some packages (continuing)"
 
   mkdir -p "$BASE_DIR" "$CONFIG_DIR"
@@ -187,7 +187,7 @@ bootstrap_system() {
 
   # 🔹 انتخاب هوشمند BIN_URL بر اساس نسخه اوبونتو
   local BIN_URL_DEFAULT_HANSELIME="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/paqet-linux-amd64-v1.0.0-alpha.14.tar.gz"
-  local BIN_URL_UBUNTU20_COMPAT="https://github.com/mrAboalfazl/paqet-tunnel-configuration/releases/download/v1.0.0/paqet-linux-amd64-v1.0.0.tar.gz"
+  local BIN_URL_UBUNTU20_COMPAT="https://borna.storage.c2.liara.space/temp/paqet_linux_amd64"
 
   local BIN_URL="$BIN_URL_DEFAULT_HANSELIME"
   local OS_ID="" OS_VER="" OS_MAJOR=""
@@ -203,11 +203,11 @@ bootstrap_system() {
     OS_MAJOR="${OS_VER%%.*}"    # 20 از 20.04 ، 22 از 22.04
     if [[ "$OS_MAJOR" =~ ^[0-9]+$ ]]; then
       if (( OS_MAJOR < 22 )); then
-        # Ubuntu 20.x یا پایین‌تر → از باینری خودت استفاده کن
+        # Ubuntu 20.x یا پایین‌تر → از باینری خودت استفاده کن (بدون .tar.gz)
         BIN_URL="$BIN_URL_UBUNTU20_COMPAT"
         log_info "Detected Ubuntu $OS_VER (major=$OS_MAJOR) → using Ubuntu20-compatible Paqet binary."
       else
-        # Ubuntu 22+ → همون hanselime
+        # Ubuntu 22+ → همون hanselime (.tar.gz)
         BIN_URL="$BIN_URL_DEFAULT_HANSELIME"
         log_info "Detected Ubuntu $OS_VER (major=$OS_MAJOR) → using default Paqet binary (hanselime)."
       fi
@@ -220,15 +220,16 @@ bootstrap_system() {
   fi
 
   log_info "Downloading Paqet binary from: $BIN_URL"
-  if ! curl -L "$BIN_URL" -o /tmp/paqet.tar.gz; then
-    die "Failed to download Paqet binary from $BIN_URL. Place $BIN_NAME in /root and rerun."
-  fi
+  
+  # دانلود باینری
+  curl -L "$BIN_URL" -o "$BIN_PATH"
 
-  tar -xzf /tmp/paqet.tar.gz -C "$BASE_DIR"
-  rm -f /tmp/paqet.tar.gz
-
-  if [[ ! -f "$BIN_PATH" ]]; then
-    die "Extracted archive but $BIN_NAME not found in $BASE_DIR"
+  # چک کردن نوع فایل دانلود شده
+  if file "$BIN_PATH" | grep -q 'gzip compressed data'; then
+    log_info "Downloaded file is a compressed archive (tar.gz). Extracting..."
+    tar -xzf "$BIN_PATH" -C "$BASE_DIR"
+    rm -f "$BIN_PATH"  # پاک کردن فایل آرشیو
+    BIN_PATH="$BASE_DIR/paqet_linux_amd64"  # باینری پس از استخراج
   fi
 
   chmod +x "$BIN_PATH"
